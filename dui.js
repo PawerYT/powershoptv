@@ -1,30 +1,20 @@
-/* ==========================================================================
-   Powershop_tv - Reproductor de la pantalla (DUI)
-   Recibe desde Lua (SendDuiMessage) mensajes de este tipo:
-     { type: 'state', url, playing, time, volume }
-   y se encarga de: convertir el enlace a su formato embed, cargar el
-   reproductor adecuado y mantenerlo sincronizado (play/pausa/tiempo/volumen).
-   El mismo mensaje se puede recibir muchas veces: solo actúa si algo cambia.
-   ========================================================================== */
-
 'use strict';
 
 const stage = document.getElementById('stage');
 const msgBox = document.getElementById('msg');
 
-const DRIFT_SECONDS = 2.5;   // desfase máximo antes de corregir el tiempo
+const DRIFT_SECONDS = 2.5;
 const SEEK_COOLDOWN = 1500;
-const QUALITY_YT = 'hd1080';  // calidad mínima que se pide a YouTube  // ms mínimos entre dos correcciones
+const QUALITY_YT = 'hd1080';
 
-let current = null;   // { url, api, ready, lastSeek }
-let lastState = null; // último estado recibido
+let current = null;
+let lastState = null;
 
 function showMessage(text) {
     msgBox.textContent = text || '';
     msgBox.style.display = text ? 'block' : 'none';
 }
 
-/** Carga un script externo una sola vez. */
 const loadedScripts = {};
 function loadScript(src) {
     if (!loadedScripts[src]) {
@@ -39,15 +29,6 @@ function loadScript(src) {
     return loadedScripts[src];
 }
 
-/* ---- Conversión de enlaces --------------------------------------------- */
-
-/**
- * Analiza un enlace y devuelve cómo hay que reproducirlo:
- *   { kind: 'youtube', id }                 watch, youtu.be, shorts, live, embed
- *   { kind: 'twitch', channel | video }     canales y VODs
- *   { kind: 'iframe', src }                 clips de Twitch y otras webs
- *   { kind: 'direct', src, hls }            .mp4 / .webm / .ogg / .m3u8
- */
 function parseUrl(raw) {
     let u;
     try { u = new URL(raw); } catch (e) { return null; }
@@ -57,7 +38,6 @@ function parseUrl(raw) {
     const path = u.pathname;
     const idRe = /^[\w-]{6,20}$/;
 
-    // --- YouTube ---
     if (host === 'youtu.be') {
         const id = path.split('/')[1];
         if (idRe.test(id || '')) return { kind: 'youtube', id };
@@ -70,7 +50,6 @@ function parseUrl(raw) {
         if (idRe.test(id || '')) return { kind: 'youtube', id };
     }
 
-    // --- Twitch ---
     if (host === 'clips.twitch.tv') {
         const clip = path.split('/')[1];
         if (clip && clip !== 'embed') {
@@ -92,19 +71,11 @@ function parseUrl(raw) {
         if (parts[0] && /^\w{3,25}$/.test(parts[0])) return { kind: 'twitch', channel: parts[0] };
     }
 
-    // --- Vídeo directo ---
     if (/\.(mp4|webm|ogg|ogv|mov|m4v)$/i.test(path)) return { kind: 'direct', src: u.href, hls: false };
     if (/\.m3u8$/i.test(path)) return { kind: 'direct', src: u.href, hls: true };
 
-    // --- Cualquier otra web: se incrusta tal cual ---
     return { kind: 'iframe', src: u.href };
 }
-
-/* ---- Reproductores ------------------------------------------------------
-   Cada uno devuelve una "api" común:
-     play() pause() seek(s) time() paused() ended() live() volume(0..1) destroy()
-   y llama a onReady() cuando ya se le pueden dar órdenes.
-   ------------------------------------------------------------------------ */
 
 function youtubePlayer(info, state, onReady) {
     const holder = document.createElement('div');
@@ -121,13 +92,11 @@ function youtubePlayer(info, state, onReady) {
             loadScript('https://www.youtube.com/iframe_api').catch(reject);
         });
 
-    // YouTube decide la calidad sobre todo por el tamaño del reproductor (el DUI
-    // es de 1920x1080), pero además se le pide 1080p de forma explícita.
     function forceQuality() {
         try {
             if (player.setPlaybackQualityRange) player.setPlaybackQualityRange(QUALITY_YT, 'highres');
             if (player.setPlaybackQuality) player.setPlaybackQuality(QUALITY_YT);
-        } catch (e) { /* nada */ }
+        } catch (e) { }
     }
 
     ready.then(() => {
@@ -144,7 +113,6 @@ function youtubePlayer(info, state, onReady) {
             },
             events: {
                 onReady: () => { if (!destroyed) { player.unMute(); forceQuality(); onReady(); } },
-                // Al empezar a reproducir o al cambiar de calidad se vuelve a pedir 1080p
                 onStateChange: (e) => { if (e.data === 1 || e.data === 3) forceQuality(); },
                 onError: (e) => showMessage('YouTube: error ' + e.data),
             },
@@ -160,7 +128,7 @@ function youtubePlayer(info, state, onReady) {
         ended: () => player.getPlayerState() === 0,
         live: () => { const d = player.getVideoData ? player.getVideoData() : null; return !!(d && d.isLive) || !player.getDuration(); },
         volume: (v) => player.setVolume(Math.round(v * 100)),
-        destroy: () => { destroyed = true; try { if (player && player.destroy) player.destroy(); } catch (e) { /* nada */ } },
+        destroy: () => { destroyed = true; try { if (player && player.destroy) player.destroy(); } catch (e) { } },
     };
 }
 
@@ -179,7 +147,7 @@ function twitchPlayer(info, state, onReady) {
         player.addEventListener(Twitch.Player.READY, () => {
             if (destroyed) return;
             player.setMuted(false);
-            try { player.setQuality('chunked'); } catch (e) { /* nada */ } // 'chunked' = calidad de origen
+            try { player.setQuality('chunked'); } catch (e) { }
             onReady();
         });
     }).catch(() => showMessage('No se pudo cargar Twitch'));
@@ -209,12 +177,10 @@ function directPlayer(info, state, onReady) {
     video.addEventListener('error', () => showMessage('No se pudo reproducir el vídeo'));
 
     if (info.hls && !video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Los .m3u8 necesitan hls.js en Chromium
         loadScript('https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js').then(() => {
             if (destroyed) return;
             if (window.Hls && Hls.isSupported()) {
                 hls = new Hls({ capLevelToPlayerSize: false });
-                // Fuerza la variante de mayor calidad de la lista
                 hls.on(Hls.Events.MANIFEST_PARSED, () => { hls.currentLevel = hls.levels.length - 1; });
                 hls.loadSource(info.src);
                 hls.attachMedia(video);
@@ -240,8 +206,6 @@ function directPlayer(info, state, onReady) {
 }
 
 function iframePlayer(info, state, onReady) {
-    // Webs genéricas: se incrustan, pero no se pueden controlar desde fuera
-    // (ni pausa, ni tiempo, ni volumen). Para pausar se descarga la página.
     const frame = document.createElement('iframe');
     frame.allow = 'autoplay; encrypted-media; fullscreen';
     frame.src = info.src;
@@ -264,16 +228,10 @@ function iframePlayer(info, state, onReady) {
 
 const PLAYERS = { youtube: youtubePlayer, twitch: twitchPlayer, direct: directPlayer, iframe: iframePlayer };
 
-/* ---- Menú de inicio (Smart TV) ------------------------------------------
-   Lo que se ve en la pantalla cuando la TV no tiene ningún vídeo. Es solo
-   visual: los datos (aplicaciones, canales, textos) llegan desde config.lua.
-   ------------------------------------------------------------------------ */
-
 const home = document.getElementById('home');
 let homeKey = null;
 let clockTimer = null;
 
-// Iconos propios y genéricos (blancos) para las aplicaciones
 const ICONS = {
     play:  '<svg viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="none" stroke="#fff" stroke-width="3.5"/><path d="M20 15.5v17l14-8.5z" fill="#fff"/></svg>',
     live:  '<svg viewBox="0 0 48 48" fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round"><circle cx="24" cy="24" r="5" fill="#fff" stroke="none"/><path d="M14.5 14.5a13.5 13.5 0 0 0 0 19M33.5 14.5a13.5 13.5 0 0 1 0 19M8 8a22.6 22.6 0 0 0 0 32M40 8a22.6 22.6 0 0 1 0 32"/></svg>',
@@ -296,9 +254,8 @@ function tickClock() {
     clock.textContent = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
-const GRID_COLS = 5; // igual que en server/main.lua
+const GRID_COLS = 5;
 
-/** "[E] texto [OK] texto" -> teclas y texto */
 function buildHint(text) {
     const hint = node('div', 'h-hint');
     String(text || '').split(/(\[[^\]]+\])/).forEach((part) => {
@@ -309,7 +266,6 @@ function buildHint(text) {
     return hint;
 }
 
-/** Pantalla de inicio: fila de aplicaciones. */
 function buildApps(data) {
     home.appendChild(node('div', 'h-title', data.title || ''));
     const apps = node('div', 'h-apps');
@@ -323,7 +279,7 @@ function buildApps(data) {
             img.src = app.image;
             icon.appendChild(img);
         } else {
-            icon.innerHTML = ICONS[app.icon] || ICONS.play; // iconos fijos de este archivo
+            icon.innerHTML = ICONS[app.icon] || ICONS.play;
         }
         const text = node('div');
         text.appendChild(node('div', 'h-label', app.label || ''));
@@ -335,7 +291,6 @@ function buildApps(data) {
     home.appendChild(buildHint(data.hint));
 }
 
-/** Lista de una aplicación: vídeos, directos o canales. */
 function buildList(data, ui) {
     const head = node('div', 'h-head');
     head.appendChild(node('b', null, ui.title || ''));
@@ -370,23 +325,21 @@ function buildList(data, ui) {
     home.appendChild(buildHint(ui.searchable ? data.searchHint : data.listHint));
 }
 
-/** Marca el elemento seleccionado y desplaza la rejilla para que se vea. */
 function selectItem(index) {
     home.querySelectorAll('[data-i]').forEach((n) => n.classList.toggle('sel', Number(n.dataset.i) === index));
     const grid = home.querySelector('.h-grid');
     if (!grid || !grid.children.length) return;
     const row = Math.floor((Math.min(index, grid.children.length) - 1) / GRID_COLS);
-    const firstRow = Math.max(0, row - 1); // se ven dos filas: la seleccionada queda abajo
+    const firstRow = Math.max(0, row - 1);
     const anchor = grid.children[firstRow * GRID_COLS];
     grid.style.transform = `translateY(${-(anchor ? anchor.offsetTop : 0)}px)`;
 }
 
 function showHome(state) {
     const data = state.home;
-    if (!data) { hideHome(); return; } // menú desactivado en config: pantalla en negro
+    if (!data) { hideHome(); return; }
     const ui = (state.ui && typeof state.ui === 'object') ? state.ui : { view: 'home', index: 1 };
 
-    // Solo se reconstruye si cambia algo más que la selección
     const key = JSON.stringify([state.name, data, Object.assign({}, ui, { index: 0 })]);
     if (key !== homeKey) {
         homeKey = key;
@@ -414,11 +367,9 @@ function hideHome() {
     if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
 }
 
-/* ---- Carga y sincronización -------------------------------------------- */
-
 function unload() {
     if (current) {
-        try { current.api.destroy(); } catch (e) { /* nada */ }
+        try { current.api.destroy(); } catch (e) { }
         current = null;
     }
     stage.textContent = '';
@@ -433,7 +384,6 @@ function load(state) {
         showMessage('Enlace no válido');
         return;
     }
-    // Twitch no se deja incrustar en la página local del juego: se avisa en pantalla
     const isTwitch = info.kind === 'twitch' || (info.kind === 'iframe' && /twitch\.tv/.test(info.src));
     if (isTwitch && /^cfx-nui-/i.test(location.hostname)) {
         current = { url: state.url, api: null, ready: false };
@@ -466,10 +416,9 @@ function apply(state) {
             return;
         }
 
-        if (api.ended()) return;       // el vídeo ya terminó: no se reinicia
+        if (api.ended()) return;
         if (api.paused()) api.play();
 
-        // Corrige el tiempo si se ha desfasado (no aplica a directos)
         if (!api.live()) {
             const now = Date.now();
             const target = Math.max(0, Number(state.time) || 0);
@@ -479,7 +428,6 @@ function apply(state) {
             }
         }
     } catch (e) {
-        // El reproductor aún no está listo del todo: se reintentará en el siguiente mensaje
     }
 }
 
